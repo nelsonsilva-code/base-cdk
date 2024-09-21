@@ -16,7 +16,9 @@
     "eslint-plugin-jest": "^26.5.3",
     "jest": "^28.1.1",
     "ts-node": "^10.8.1",
-    "typescript": "^4.7.4"
+    "typescript": "^4.7.4",
+    "@nelsonsilva-code/cdk-commons": "1.0.0"
+
   },
   "dependencies": {
     "@vw-sre/vws-cdk": "^2.8.1",

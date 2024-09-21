@@ -1,4 +1,4 @@
-import { Stack, StackProps } from 'aws-cdk-lib';
+import {Duration, Stack, StackProps} from 'aws-cdk-lib';
 import {
   GatewayVpcEndpointAwsService,
   InterfaceVpcEndpointAwsService, InterfaceVpcEndpointService,
@@ -7,18 +7,34 @@ import {
 } from 'aws-cdk-lib/aws-ec2';
 import { Construct } from 'constructs';
 import {StringParameter} from "aws-cdk-lib/aws-ssm";
-import {prefix} from "aws-cdk/lib/logging";
 import {CfnProxy} from "@vw-sre/vws-cdk";
+import {PrivateDnsNamespace} from "aws-cdk-lib/aws-servicediscovery";
+import {Topic} from "aws-cdk-lib/aws-sns";
+import {Key} from "aws-cdk-lib/aws-kms";
+import {EmailSubscription} from "aws-cdk-lib/aws-sns-subscriptions";
+import {EnvironmentStage} from "@nelsonsilva-code/cdk-commons";
+import {ServicePrincipal} from "aws-cdk-lib/aws-iam";
+import {ConfigurationSet, EmailIdentity, EmailSendingEvent, EventDestination, Identity} from "aws-cdk-lib/aws-ses";
+import {Alarm, ComparisonOperator, Metric, TreatMissingData} from "aws-cdk-lib/aws-cloudwatch";
+import {SnsAction} from "aws-cdk-lib/aws-cloudwatch-actions";
 
 interface BaseResourcesStackProps extends StackProps {
-  environmentName: string;
+  environmentName: EnvironmentStage['stage'],
+  env: {
+    account: string,
+    region: string,
+  },
 }
 
 export class BaseResourcesStack extends Stack {
   constructor(scope: Construct, id: string, props: BaseResourcesStackProps) {
     super(scope, id, props);
 
-    const env = props.environmentName;
+    this.createVpc(props.environmentName)
+
+  }
+
+  private createVpc(environmentName: string){
 
     const vwsProxy = new CfnProxy(this, 'EnvironmentProxy', {
       allowedCidrs: [],
@@ -26,8 +42,8 @@ export class BaseResourcesStack extends Stack {
       allowedSuffixes: ['vwgroup.io','cariad.digital', 'vwapps.run', 'log-api.eu.newrelic.com','gradle.org','nr-data.net','nr-assets.net'],
     });
 
-    const vpc = new Vpc(this, 'MicroserviceVpc', {
-      vpcName: `${env}-MicroservicesVpc`,
+    const vpc = new Vpc(this, 'AcademyVpc', {
+      vpcName: `${environmentName}-Vpc`,
       subnetConfiguration: [
         {
           name: 'ingress',
@@ -39,6 +55,8 @@ export class BaseResourcesStack extends Stack {
         },
       ],
     });
+
+    this.createPrivateDnsNamespace(vpc, environmentName)
 
     // VWS Services
     vpc.addInterfaceEndpoint('Proxy', {
@@ -68,40 +86,65 @@ export class BaseResourcesStack extends Stack {
       service: GatewayVpcEndpointAwsService.S3,
       subnets: [{ subnetType: SubnetType.PRIVATE_ISOLATED }],
     });
-    const ecr = vpc.addInterfaceEndpoint('Ecr', {
+    vpc.addInterfaceEndpoint('Ecr', {
       service: InterfaceVpcEndpointAwsService.ECR,
       subnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
     });
-    const ecs = vpc.addInterfaceEndpoint('ECS', {
+    vpc.addInterfaceEndpoint('ECS', {
       service: InterfaceVpcEndpointAwsService.ECS,
       subnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
     });
-    const gateway = vpc.addInterfaceEndpoint('ApiGateWay', {
+    vpc.addInterfaceEndpoint('ApiGateWay', {
       service: InterfaceVpcEndpointAwsService.APIGATEWAY,
       subnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
     });
-    const ecrDocker = vpc.addInterfaceEndpoint('EcrDocker', {
+    vpc.addInterfaceEndpoint('EcrDocker', {
       service: InterfaceVpcEndpointAwsService.ECR_DOCKER,
       subnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
     });
-    const cloudwatch = vpc.addInterfaceEndpoint('CloudWatch', {
+    vpc.addInterfaceEndpoint('CloudWatch', {
       service: InterfaceVpcEndpointAwsService.CLOUDWATCH,
       subnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
     });
-    const kinesis = vpc.addInterfaceEndpoint('KinesisStreams', {
+    vpc.addInterfaceEndpoint('KinesisStreams', {
       service: InterfaceVpcEndpointAwsService.KINESIS_STREAMS,
       subnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
     });
-    const sqs = vpc.addInterfaceEndpoint('SQS', {
+    vpc.addInterfaceEndpoint('SQS', {
       service: InterfaceVpcEndpointAwsService.SQS,
       subnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
     });
+    vpc.addInterfaceEndpoint('SSMMessages', {
+      service:InterfaceVpcEndpointAwsService.SSM_MESSAGES,
+      subnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
+    })
 
-    new StringParameter(this, 'EndpointParameter', {
-      description: 'Parameter that contains vpc endpoint ids that cna be deleted',
-      parameterName: `/${env.toLowerCase()}/vpc-microservices/endpoints`,
-      stringValue:
-          `${ecs.vpcEndpointId},${ecr.vpcEndpointId},${ecrDocker.vpcEndpointId},${cloudwatch.vpcEndpointId},${sqs.vpcEndpointId},${kinesis.vpcEndpointId}, ${gateway.vpcEndpointId}`
+    return vpc;
+  }
+  private getEnvironmentPrefix(environment: string) {
+    return environment !== 'Production' ? `${environment}.` : '';
+  }
+
+  private createPrivateDnsNamespace(vpc: Vpc, environmentName: string) {
+    environmentName = environmentName.toLowerCase()
+    const name = this.getEnvironmentPrefix(environmentName) + 'internal';
+
+    const privateDnsNamespace = new PrivateDnsNamespace(this, `${environmentName}AcademyPrivateDnsNamespace`, {
+      name,
+      vpc,
+      description: `Private DNS namespace for Junior Academy 2024 in ${environmentName} environment`,
     });
+
+    new StringParameter(this, `${environmentName}AcademyPrivateDnsNamespaceArn`, {
+      parameterName: `/${environmentName}/academy/private-dns-namespace-arn`,
+      stringValue: privateDnsNamespace.namespaceArn,
+    });
+
+    new StringParameter(this, `${environmentName}AcademyPrivateDnsNamespaceId`, {
+      parameterName: `/${environmentName}/academy/private-dns-namespace-id`,
+      stringValue: privateDnsNamespace.namespaceId,
+    });
+
+    return privateDnsNamespace;
   }
 }
